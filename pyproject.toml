@@ -1,0 +1,33 @@
+[project]
+name = "mcdonalds-nutrition-agent"
+version = "0.1.0"
+description = "LangGraph-based McDonald's ordering agent using MiniMax M2.7"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "langchain>=0.3.27",
+  "langgraph>=0.2.39",
+  "langchain-openai>=0.3.28",
+  "pydantic>=2.8.2",
+  "pydantic-settings>=2.4.0",
+  "requests>=2.32.3",
+  "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.2",
+]
+
+[project.scripts]
+mcd-agent = "mcd_agent.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

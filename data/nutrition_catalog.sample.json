@@ -1,0 +1,98 @@
+{
+  "巨无霸": {
+    "calories": 550,
+    "protein_g": 26,
+    "fat_g": 30,
+    "carbs_g": 45,
+    "sodium_mg": 1010,
+    "sugar_g": 9
+  },
+  "双层吉士汉堡": {
+    "calories": 440,
+    "protein_g": 25,
+    "fat_g": 24,
+    "carbs_g": 33,
+    "sodium_mg": 1120,
+    "sugar_g": 7
+  },
+  "麦香鸡": {
+    "calories": 400,
+    "protein_g": 14,
+    "fat_g": 21,
+    "carbs_g": 38,
+    "sodium_mg": 860,
+    "sugar_g": 6
+  },
+  "板烧鸡腿堡": {
+    "calories": 430,
+    "protein_g": 24,
+    "fat_g": 16,
+    "carbs_g": 47,
+    "sodium_mg": 980,
+    "sugar_g": 10
+  },
+  "麦辣鸡腿堡": {
+    "calories": 500,
+    "protein_g": 20,
+    "fat_g": 25,
+    "carbs_g": 50,
+    "sodium_mg": 1300,
+    "sugar_g": 8
+  },
+  "原味板烧鸡腿麦满分": {
+    "calories": 370,
+    "protein_g": 20,
+    "fat_g": 15,
+    "carbs_g": 39,
+    "sodium_mg": 760,
+    "sugar_g": 6
+  },
+  "猪柳蛋麦满分": {
+    "calories": 460,
+    "protein_g": 18,
+    "fat_g": 28,
+    "carbs_g": 34,
+    "sodium_mg": 870,
+    "sugar_g": 4
+  },
+  "薯条(中)": {
+    "calories": 320,
+    "protein_g": 4,
+    "fat_g": 15,
+    "carbs_g": 43,
+    "sodium_mg": 260,
+    "sugar_g": 0
+  },
+  "玉米杯": {
+    "calories": 90,
+    "protein_g": 3,
+    "fat_g": 1,
+    "carbs_g": 19,
+    "sodium_mg": 80,
+    "sugar_g": 6
+  },
+  "麦旋风(奥利奥)": {
+    "calories": 340,
+    "protein_g": 7,
+    "fat_g": 11,
+    "carbs_g": 54,
+    "sodium_mg": 170,
+    "sugar_g": 42
+  },
+  "无糖可乐": {
+    "calories": 0,
+    "protein_g": 0,
+    "fat_g": 0,
+    "carbs_g": 0,
+    "sodium_mg": 40,
+    "sugar_g": 0
+  },
+  "鲜煮咖啡": {
+    "calories": 10,
+    "protein_g": 1,
+    "fat_g": 0,
+    "carbs_g": 1,
+    "sodium_mg": 5,
+    "sugar_g": 0
+  }
+}
