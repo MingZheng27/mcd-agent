@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Optional
 
 from langchain.tools import StructuredTool
@@ -23,6 +24,20 @@ from .models import (
 from .nutrition import NutritionAnalyzer, RecommendationEngine
 
 logger = logging.getLogger(__name__)
+
+
+class DecimalEncoder(json.JSONEncoder):
+    """自定义JSON编码器，支持Decimal类型"""
+
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
+
+
+def _safe_json_dumps(obj: Any, **kwargs) -> str:
+    """安全的JSON序列化，支持Decimal类型"""
+    return json.dumps(obj, cls=DecimalEncoder, ensure_ascii=False, **kwargs)
 
 
 class UpdatePreferenceInput(BaseModel):
@@ -556,7 +571,7 @@ def build_tools(
                     for item in ranked[:5]
                 ],
             }
-            return json.dumps(summary, ensure_ascii=False, indent=2)
+            return _safe_json_dumps(summary, indent=2)
 
         menu = (menu_response.get("data") or {}).get("menu") or []
         flattened: list[dict[str, Any]] = []
@@ -598,7 +613,7 @@ def build_tools(
             }
             for item in ranked[:5]
         ]
-        return json.dumps(summary, ensure_ascii=False, indent=2)
+        return _safe_json_dumps(summary, indent=2)
 
     def sync_cart(items: list[CartItemInput], replace_cart: bool = True, data_source: int = 1) -> str:
         del data_source

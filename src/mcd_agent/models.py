@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Optional, Union
 
 from pydantic import BaseModel, Field
@@ -37,7 +38,7 @@ class CandidateItem(BaseModel):
     code: str
     name: str
     category: Optional[str] = None
-    price: Optional[int] = None
+    price: Union[int, float, Decimal, None] = None
     nutrition: Optional[NutritionFacts] = None
     reasons: list[str] = Field(default_factory=list)
     score: float = 0.0
@@ -86,7 +87,7 @@ class OrderItem(BaseModel):
     product_code: str
     product_name: str
     quantity: int = 1
-    real_subtotal: Optional[int] = None
+    real_subtotal: Union[int, float, Decimal, None] = None
     sequence: int = 1
     product_type: str = "single"
     unique_key: Optional[str] = None
@@ -98,13 +99,13 @@ class CartSnapshot(BaseModel):
     order_type: Optional[int] = None
     day_part_code: Optional[str] = None
     cart_type: int = 1
-    total_price: Optional[int] = None
-    product_total_price: Optional[int] = None
-    discount_amount: Optional[int] = None
-    delivery_price: Optional[int] = None
-    real_total_price: Optional[int] = None
-    real_delivery_price: Optional[int] = None
-    submit: Optional[int] = None
+    total_price: Union[int, float, Decimal, None] = None
+    product_total_price: Union[int, float, Decimal, None] = None
+    discount_amount: Union[int, float, Decimal, None] = None
+    delivery_price: Union[int, float, Decimal, None] = None
+    real_total_price: Union[int, float, Decimal, None] = None
+    real_delivery_price: Union[int, float, Decimal, None] = None
+    submit: Union[int, float, Decimal, None] = None
     products: list[dict[str, Any]] = Field(default_factory=list)
     promotions: list[dict[str, Any]] = Field(default_factory=list)
     tips: dict[str, Any] = Field(default_factory=dict)

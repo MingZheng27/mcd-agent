@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,17 @@ class RecommendationEngine:
     def __init__(self, catalog: NutritionCatalog) -> None:
         self.catalog = catalog
 
+    def _normalize_price(self, value: Any) -> int | float | Decimal | None:
+        """规范化价格字段，支持整数、浮点、Decimal或None"""
+        if value is None:
+            return None
+        if isinstance(value, (int, float, Decimal)):
+            return value
+        try:
+            return Decimal(str(value))
+        except (ValueError, TypeError):
+            return None
+
     def enrich_and_rank(self, menu_items: list[dict], preference: UserPreference) -> list[CandidateItem]:
         ranked: list[CandidateItem] = []
         for item in menu_items:
@@ -47,7 +59,7 @@ class RecommendationEngine:
                 code=str(item.get("code") or item.get("productCode") or ""),
                 name=name,
                 category=item.get("categoryName"),
-                price=item.get("price") or item.get("realPrice"),
+                price=self._normalize_price(item.get("price") or item.get("realPrice")),
                 nutrition=nutrition,
                 raw=item,
             )
