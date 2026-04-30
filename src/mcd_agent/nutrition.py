@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .mcd_mcp_client import McdMcpClient, McdToolError
+from .mcd_mcp_client import McdMcpClient, McdToolError, logger
 from .models import (
     CandidateItem,
     NutritionFacts,
@@ -158,6 +158,346 @@ class NutritionAnalyzer:
         self.catalog = catalog
         self.mcp_tool_client = mcp_tool_client
 
+    def query_nutrition(self, product_name: str) -> dict[str, Any] | None:
+        """
+        直接查询单个商品的营养成分
+        
+        优先级：
+        1. 优先从 MCP 营养工具查询（麦当劳官方数据）
+        2. MCP 查询失败或无匹配时，使用本地营养库兜底
+        
+        Args:
+            product_name: 商品名称
+            
+        Returns:
+            包含营养成分的字典，查询失败返回None
+        """
+        # 优先从 MCP 查询营养数据
+        if self.mcp_tool_client:
+            try:
+                mcp_result = self._query_mcp_nutrition(product_name)
+                if mcp_result:
+                    return mcp_result
+            except McdToolError as exc:
+                logger.warning(f"MCP营养查询失败: {exc}")
+        
+        # MCP 查询失败或无匹配时，使用本地营养库兜底
+        local_nutrition = self.catalog.find(product_name)
+        if local_nutrition:
+            return {
+                "product_name": product_name,
+                "source": "local_catalog",
+                "nutrition": local_nutrition.model_dump(),
+                "note": "MCP未返回数据，使用本地营养库"
+            }
+        
+        return None
+
+    def _query_mcp_nutrition(self, product_name: str) -> dict[str, Any] | None:
+        """从MCP工具查询营养成分"""
+        if not self.mcp_tool_client:
+            return None
+        
+        tool = self.mcp_tool_client.find_tool("list-nutrition-foods")
+        if not tool:
+            raise McdToolError("未发现 list-nutrition-foods 工具")
+        
+        # 尝试不同的关键词查询
+        for keyword in [product_name, "麦当劳", ""]:
+            try:
+                arguments = {}
+                # 根据工具schema构建参数
+                schema = tool.get("inputSchema") or {}
+                properties = schema.get("properties") or {}
+                
+                # 尝试不同的参数名
+                for field_name in ("keyword", "query", "foodName", "productName", "name"):
+                    if field_name in properties:
+                        arguments[field_name] = keyword
+                        break
+                
+                result = self.mcp_tool_client.call_tool("list-nutrition-foods", arguments)
+                
+                # ✅ 从 structuredContent.data 节点提取 TOON 格式数据
+                toon_data = self._extract_structured_content_data(result)
+                if not toon_data:
+                    logger.debug(f"未找到 structuredContent.data，尝试使用文本解析")
+                    # 备用：使用 extract_text
+                    toon_data = self.mcp_tool_client.extract_text(result)
+                
+                # 查找匹配的营养记录
+                matched = self._parse_nutrition_from_text(product_name, toon_data)
+                if matched:
+                    return {
+                        "product_name": product_name,
+                        "source": "mcp",
+                        "nutrition": matched,
+                        "note": "来自麦当劳MCP营养工具"
+                    }
+            except (McdToolError, Exception) as exc:
+                logger.debug(f"MCP查询尝试失败 (keyword={keyword}): {exc}")
+                continue
+        
+        return None
+
+    def _extract_structured_content_data(self, result: dict[str, Any]) -> str | None:
+        """
+        从 MCP 结果中提取 structuredContent.data 节点
+        
+        实际返回格式：
+        {
+            "result": {
+                "content": [...],
+                "structuredContent": {
+                    "success": true,
+                    "code": 200,
+                    "data": "[160]{productName,...}:\n  猪柳麦满分,null,..."
+                }
+            }
+        }
+        """
+        structured = result.get("result", {}).get("structuredContent", {})
+        data = structured.get("data")
+        
+        if isinstance(data, str) and data.strip():
+            return data
+        
+        return None
+
+    def _parse_nutrition_from_text(self, product_name: str, text_content: str) -> dict[str, Any] | None:
+        """
+        从 TOON 格式的文本中解析营养成分
+        
+        TOON 格式示例：
+        [1]{productName,nutritionDescription,energyKj,energyKcal,protein,fat,carbohydrate,sodium,calcium}:
+          猪柳麦满分,null,1288,308,16,16,24,781,213
+        
+        Args:
+            product_name: 要查询的商品名称
+            text_content: MCP 返回的 TOON 格式文本
+            
+        Returns:
+            营养数据字典，解析失败返回 None
+        """
+        if not text_content or not text_content.strip():
+            return None
+        
+        normalized_query = self._normalize_name(product_name)
+        
+        # 解析 TOON 格式
+        nutrition_data = self._parse_toon_format(text_content)
+        
+        if not nutrition_data:
+            return None
+        
+        # 在解析的数据中查找匹配的商品
+        for record in nutrition_data:
+            product_name_field = record.get("productName", "")
+            if not product_name_field:
+                continue
+            
+            # 名称匹配
+            normalized_record_name = self._normalize_name(product_name_field)
+            if (normalized_query == normalized_record_name or 
+                normalized_query in normalized_record_name or 
+                normalized_record_name in normalized_query):
+                
+                # 转换为标准营养数据格式
+                return self._convert_toon_to_nutrition(record)
+        
+        return None
+
+    def _parse_toon_format(self, text: str) -> list[dict[str, Any]]:
+        """
+        解析 TOON 格式文本
+        
+        TOON 格式：
+        [1]{field1,field2,field3}:
+          value1,value2,value3
+        
+        Returns:
+            解析后的字典列表
+        """
+        lines = text.strip().split('\n')
+        if not lines:
+            return []
+        
+        # 解析头部：提取字段名
+        header_line = lines[0].strip()
+        
+        # 匹配格式: [1]{field1,field2,...} 或 [N]{field1,field2,...}
+        import re
+        header_match = re.search(r'\[(\d+)\]\{(.+?)\}', header_line)
+        if not header_match:
+            # 尝试其他格式
+            return self._parse_simple_csv_format(text)
+        
+        fields_str = header_match.group(2)
+        fields = [f.strip() for f in fields_str.split(',')]
+        
+        # 解析数据行
+        records = []
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # 解析 CSV 格式的数据
+            values = self._parse_toon_csv_line(line, len(fields))
+            if len(values) == len(fields):
+                record = dict(zip(fields, values))
+                records.append(record)
+        
+        return records
+
+    def _parse_toon_csv_line(self, line: str, expected_count: int) -> list[str]:
+        """
+        解析 TOON CSV 格式的行
+        
+        处理逗号分隔的值，处理 null 值
+        """
+        values = []
+        current = ""
+        in_quotes = False
+        
+        for char in line:
+            if char == '"':
+                in_quotes = not in_quotes
+            elif char == ',' and not in_quotes:
+                # 结束当前字段
+                value = current.strip()
+                values.append(value if value.lower() != 'null' else None)
+                current = ""
+            else:
+                current += char
+        
+        # 添加最后一个字段
+        value = current.strip()
+        values.append(value if value.lower() != 'null' else None)
+        
+        return values
+
+    def _parse_simple_csv_format(self, text: str) -> list[dict[str, Any]]:
+        """
+        解析简单的 CSV 格式（备用方案）
+        
+        格式：
+        productName,energyKcal,protein,fat,carbohydrate,sodium
+        猪柳麦满分,308,16,16,24,781
+        """
+        lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
+        if len(lines) < 2:
+            return []
+        
+        # 假设第一行是表头
+        header = [h.strip() for h in lines[0].split(',')]
+        
+        records = []
+        for line in lines[1:]:
+            values = self._parse_toon_csv_line(line, len(header))
+            if len(values) == len(header):
+                record = dict(zip(header, values))
+                records.append(record)
+        
+        return records
+
+    def _convert_toon_to_nutrition(self, record: dict[str, Any]) -> dict[str, Any]:
+        """
+        将 TOON 格式的营养记录转换为标准格式
+        
+        TOON 字段 -> 标准字段：
+        - productName -> name
+        - energyKcal -> calories
+        - energyKj -> energy_kj
+        - protein -> protein_g
+        - fat -> fat_g
+        - carbohydrate -> carbs_g
+        - sodium -> sodium_mg
+        - calcium -> calcium_mg
+        """
+        nutrition = {}
+        
+        # 热量（千卡）
+        energy_kcal = record.get('energyKcal')
+        if energy_kcal and energy_kcal != 'null':
+            try:
+                nutrition['calories'] = int(float(energy_kcal))
+            except (ValueError, TypeError):
+                pass
+        
+        # 能量（千焦）- 保存备用
+        energy_kj = record.get('energyKj')
+        if energy_kj and energy_kj != 'null':
+            try:
+                nutrition['energy_kj'] = int(float(energy_kj))
+            except (ValueError, TypeError):
+                pass
+        
+        # 蛋白质
+        protein = record.get('protein')
+        if protein and protein != 'null':
+            try:
+                nutrition['protein_g'] = float(protein)
+            except (ValueError, TypeError):
+                pass
+        
+        # 脂肪
+        fat = record.get('fat')
+        if fat and fat != 'null':
+            try:
+                nutrition['fat_g'] = float(fat)
+            except (ValueError, TypeError):
+                pass
+        
+        # 碳水化合物
+        carbs = record.get('carbohydrate')
+        if carbs and carbs != 'null':
+            try:
+                nutrition['carbs_g'] = float(carbs)
+            except (ValueError, TypeError):
+                pass
+        
+        # 钠
+        sodium = record.get('sodium')
+        if sodium and sodium != 'null':
+            try:
+                nutrition['sodium_mg'] = float(sodium)
+            except (ValueError, TypeError):
+                pass
+        
+        # 糖（TOON 格式中没有单独的糖字段，用 carbohydrate 代替）
+        # 钙
+        calcium = record.get('calcium')
+        if calcium and calcium != 'null':
+            try:
+                nutrition['calcium_mg'] = float(calcium)
+            except (ValueError, TypeError):
+                pass
+        
+        return nutrition
+
+    def _find_matching_nutrition(self, product_name: str, nutrition_records: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """从营养记录列表中找到匹配的商品"""
+        normalized_query = self._normalize_name(product_name)
+        
+        for record in nutrition_records:
+            if not self._looks_like_nutrition_record(record):
+                continue
+                
+            candidate_name = self._pick_name(record)
+            if not candidate_name:
+                continue
+                
+            normalized_candidate = self._normalize_name(candidate_name)
+            
+            # 匹配逻辑：完全匹配或包含关系
+            if (normalized_query == normalized_candidate or 
+                normalized_query in normalized_candidate or 
+                normalized_candidate in normalized_query):
+                return self._record_to_facts(record)
+        
+        return None
+
     def analyze_order(self, cart_items: list[OrderItem]) -> NutritionReport:
         if self.mcp_tool_client:
             try:
@@ -203,28 +543,60 @@ class NutritionAnalyzer:
         nutrition_index = self._fetch_mcp_nutrition_index(tool)
         items: list[NutritionLineItem] = []
         total = NutritionFacts()
+        mcp_matched = 0
+        local_matched = 0
 
         for item in cart_items:
+            # 优先从 MCP 营养索引匹配
             matched_name, facts = self._match_mcp_nutrition(item.product_name, nutrition_index)
-            items.append(
-                NutritionLineItem(
-                    product_name=item.product_name,
-                    quantity=item.quantity,
-                    nutrition=facts,
-                    source="mcp" if facts else "mcp_unmatched",
-                    note=f"MCP 命中名称: {matched_name}" if matched_name else "MCP 未命中该商品，可能需要人工核对",
-                )
-            )
+            
+            # 如果 MCP 命中，使用 MCP 数据
             if facts:
+                items.append(
+                    NutritionLineItem(
+                        product_name=item.product_name,
+                        quantity=item.quantity,
+                        nutrition=facts,
+                        source="mcp",
+                        note=f"MCP 命中: {matched_name}",
+                    )
+                )
                 self._add_facts(total, facts, item.quantity)
+                mcp_matched += 1
+            else:
+                # MCP 未命中时，使用本地营养库兜底
+                local_facts = self.catalog.find(item.product_name)
+                if local_facts:
+                    items.append(
+                        NutritionLineItem(
+                            product_name=item.product_name,
+                            quantity=item.quantity,
+                            nutrition=local_facts,
+                            source="local_fallback",
+                            note="MCP未命中，使用本地营养库补充",
+                        )
+                    )
+                    self._add_facts(total, local_facts, item.quantity)
+                    local_matched += 1
+                else:
+                    # 本地库也没有，标记为未命中
+                    items.append(
+                        NutritionLineItem(
+                            product_name=item.product_name,
+                            quantity=item.quantity,
+                            nutrition=None,
+                            source="unmatched",
+                            note="MCP和本地库均未命中该商品",
+                        )
+                    )
 
         return NutritionReport(
-            source="mcp",
+            source="mcp_with_local_fallback",
             items=items,
             total=total,
-            note="营养结果优先来自麦当劳 MCP 营养工具。",
+            note=f"营养结果：{mcp_matched}项来自MCP，{local_matched}项来自本地库补充。",
             generated_at=datetime.now().isoformat(),
-            raw={"matched_count": sum(1 for item in items if item.nutrition)},
+            raw={"mcp_matched": mcp_matched, "local_matched": local_matched, "unmatched": len(cart_items) - mcp_matched - local_matched},
         )
 
     def _fetch_mcp_nutrition_index(self, tool: dict[str, Any]) -> list[dict[str, Any]]:
@@ -248,22 +620,55 @@ class NutritionAnalyzer:
                 continue
             seen.add(key)
             result = self.mcp_tool_client.call_tool("list-nutrition-foods", arguments)
-            parsed = self._extract_nutrition_dicts(result)
+            # ✅ 使用 structuredContent.data 解析
+            parsed = self._parse_nutrition_index_from_text(result)
             if parsed:
                 return parsed
 
         raise McdToolError("无法从 MCP 营养工具中提取结构化数据。")
 
-    def _extract_nutrition_dicts(self, result: dict[str, Any]) -> list[dict[str, Any]]:
-        candidates = self.mcp_tool_client.extract_json_objects(result)
-        flattened: list[dict[str, Any]] = []
-        for candidate in candidates:
-            if self._looks_like_nutrition_record(candidate):
-                flattened.append(candidate)
-            for value in candidate.values():
-                if isinstance(value, list):
-                    flattened.extend(item for item in value if isinstance(item, dict) and self._looks_like_nutrition_record(item))
-        return flattened
+    def _parse_nutrition_index_from_text(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        从 TOON 格式的 MCP 响应中解析营养数据索引
+        
+        实际返回格式（来自 structuredContent.data）：
+        [160]{productName,nutritionDescription,energyKj,energyKcal,protein,fat,carbohydrate,sodium,calcium}:
+          猪柳麦满分,null,1288,308,16,16,24,781,213
+          猪柳蛋麦满分,null,1618,387,23,21,25,846,243
+          ...
+        
+        Returns:
+            营养数据字典列表
+        """
+        # ✅ 从 structuredContent.data 节点提取 TOON 数据
+        text_content = self._extract_structured_content_data(result)
+        
+        if not text_content or not text_content.strip():
+            return []
+        
+        # 使用新的 TOON 解析器
+        nutrition_records = self._parse_toon_format(text_content)
+        
+        if nutrition_records:
+            # 转换为兼容格式
+            return [
+                {
+                    "name": record.get("productName", ""),
+                    "nutritionDescription": record.get("nutritionDescription"),
+                    "energyKj": record.get("energyKj"),
+                    "energyKcal": record.get("energyKcal"),
+                    "protein": record.get("protein"),
+                    "fat": record.get("fat"),
+                    "carbohydrate": record.get("carbohydrate"),
+                    "sodium": record.get("sodium"),
+                    "calcium": record.get("calcium"),
+                }
+                for record in nutrition_records
+                if record.get("productName")
+            ]
+        
+        return []
+
 
     @staticmethod
     def _looks_like_nutrition_record(record: dict[str, Any]) -> bool:

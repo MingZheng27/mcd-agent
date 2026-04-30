@@ -126,6 +126,11 @@ class DeleteAddressInput(BaseModel):
     address_id: str
 
 
+class QueryNutritionInput(BaseModel):
+    """直接查询商品营养成分的输入参数"""
+    product_name: str = Field(description="商品名称，例如：板烧鸡腿堡、薯条、可乐等")
+
+
 def _parse_address(raw: dict[str, Any]) -> DeliveryAddress:
     full_address = raw.get("displayFullText") or raw.get("fullAddress")
     return DeliveryAddress(
@@ -730,6 +735,49 @@ def build_tools(
         session_state.confirmed = False
         return "订单附加选项已更新。"
 
+    def query_nutrition(product_name: str) -> str:
+        """
+        直接查询单个商品的营养成分
+        
+        支持从本地营养库和MCP营养工具两个来源查询营养数据。
+        用户可以直接查询某个商品的热量、蛋白质、脂肪、碳水化合物、钠、糖等营养信息。
+        
+        Args:
+            product_name: 商品名称
+            
+        Returns:
+            包含营养成分的JSON字符串
+        """
+        if not product_name or not product_name.strip():
+            return "请提供有效的商品名称，例如：板烧鸡腿堡、薯条、可乐等"
+        
+        product_name = product_name.strip()
+        logger.info(f"查询商品营养成分: {product_name}")
+        
+        # 调用营养分析器查询
+        result = nutrition_analyzer.query_nutrition(product_name)
+        
+        if result:
+            nutrition = result.get("nutrition")
+            source = result.get("source")
+            note = result.get("note")
+            
+            response = {
+                "product_name": product_name,
+                "source": source,
+                "note": note,
+                "nutrition": nutrition,
+            }
+            return _safe_json_dumps(response, indent=2)
+        else:
+            # 没有找到营养数据
+            return json.dumps({
+                "product_name": product_name,
+                "source": "none",
+                "nutrition": None,
+                "note": f"抱歉，暂时无法获取「{product_name}」的营养成分数据。可能原因：1) 该商品暂时不提供营养信息；2) 系统暂时无法连接营养数据库。建议您可以先下单，到餐后可查看官方营养信息。"
+            }, ensure_ascii=False, indent=2)
+
     def prepare_order_confirmation() -> str:
         cart_json = get_cart_detail()
         if cart_json.startswith("请先"):
@@ -875,6 +923,12 @@ def build_tools(
             name="update_order_options",
             description="更新订单附加选项，如备注、餐具、配送时间或取餐方式。",
             args_schema=UpdateOrderOptionsInput,
+        ),
+        StructuredTool.from_function(
+            func=query_nutrition,
+            name="query_nutrition",
+            description="直接查询单个麦当劳商品的热量、蛋白质、脂肪、碳水化合物、钠、糖等营养成分信息。支持本地营养库和MCP营养工具双重数据源。",
+            args_schema=QueryNutritionInput,
         ),
         StructuredTool.from_function(
             func=prepare_order_confirmation,

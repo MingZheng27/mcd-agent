@@ -64,6 +64,7 @@ class McdMcpClient:
         self._request_id = 0
         self._tools_cache: Optional[list[dict[str, Any]]] = None
         self._resolved_tools: dict[str, dict[str, Any]] = {}
+        self._initialized: bool = False  # ✅ 标记是否已初始化
 
     def _validate_token(self) -> None:
         if not self.settings.mcd_mcp_token:
@@ -276,7 +277,7 @@ class McdMcpClient:
         return adapted
 
     def initialize(self) -> dict[str, Any]:
-        if self._session_id:
+        if self._initialized:  # ✅ 已初始化，跳过
             return {"session_id": self._session_id}
 
         result = self._post(
@@ -290,6 +291,7 @@ class McdMcpClient:
                 },
             },
         )
+        self._initialized = True  # ✅ 标记已初始化
         try:
             requests.post(
                 self.settings.mcd_mcp_base_url,
