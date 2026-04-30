@@ -91,8 +91,10 @@ class McdOrderingAgent:
         logger.info("Invoking LangGraph agent for session=%s input=%s", session_id, user_input)
         should_append_agent_message = True
         try:
-            # todo: recursion_limit config
-            result = graph.invoke({"messages": runtime_messages}, {"recursion_limit": 10000})
+            result = graph.invoke(
+                {"messages": runtime_messages},
+                {"recursion_limit": self.settings.agent_recursion_limit}
+            )
             output = self._extract_final_answer(result["messages"])
         except Exception as exc:  # noqa: BLE001
             logger.exception("Agent invocation failed for session=%s", session_id)

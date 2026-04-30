@@ -24,7 +24,10 @@ class MockSettings:
 
 def load_example_response():
     """加载实际的 example 响应"""
-    example_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'mcd_agent', 'nutrition_example_resp.json')
+    # 使用 __file__ 的相对路径：从 tests/test_toon_parsing.py 到项目根目录
+    test_file = __file__
+    base_dir = os.path.dirname(os.path.dirname(test_file))
+    example_path = os.path.join(base_dir, 'src', 'mcd_agent', 'example', 'nutrition_example_resp.json')
     with open(example_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 

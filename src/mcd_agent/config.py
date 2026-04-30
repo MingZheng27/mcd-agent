@@ -31,6 +31,7 @@ class Settings(BaseSettings):
         alias="NUTRITION_CATALOG_PATH",
     )
     dry_run_orders: bool = Field(default=True, alias="DRY_RUN_ORDERS")
+    agent_recursion_limit: int = Field(default=10000, alias="AGENT_RECURSION_LIMIT")
 
     model_config = SettingsConfigDict(
         env_file=".env",
