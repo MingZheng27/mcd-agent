@@ -512,3 +512,295 @@ class McdMcpClient:
         tool = self._resolve_tool("query_order")
         result = self.call_tool(str(tool.get("name")), self._adapt_arguments(tool, {"orderId": order_id}))
         return self._extract_structured_content(result)
+
+    # ==================== 营养查询相关方法 ====================
+    
+    def query_nutrition(self, product_name: str) -> dict[str, Any] | None:
+        """
+        直接查询单个商品的营养成分（优先使用 MCP）
+        
+        Args:
+            product_name: 商品名称
+            
+        Returns:
+            包含营养成分的字典，查询失败返回 None
+        """
+        # 尝试不同的关键词查询
+        for keyword in [product_name, "麦当劳", ""]:
+            try:
+                result = self.call_nutrition_tool(keyword)
+                if result:
+                    # 从结果中查找匹配的商品
+                    matched = self._find_matching_nutrition(product_name, result)
+                    if matched:
+                        return {
+                            "product_name": product_name,
+                            "source": "mcp",
+                            "nutrition": matched,
+                            "note": "来自麦当劳 MCP 营养工具"
+                        }
+            except McdToolError as exc:
+                logger.debug(f"MCP 营养查询尝试失败 (keyword={keyword}): {exc}")
+                continue
+        
+        return None
+
+    def call_nutrition_tool(self, keyword: str = "") -> list[dict[str, Any]] | None:
+        """
+        调用 list-nutrition-foods 工具获取营养数据
+        
+        Args:
+            keyword: 查询关键词
+            
+        Returns:
+            解析后的营养数据列表，失败返回 None
+        """
+        tool = self.find_tool("list-nutrition-foods")
+        if not tool:
+            raise McdToolError("未发现 list-nutrition-foods 工具")
+        
+        # 根据工具 schema 构建参数
+        arguments = {}
+        schema = tool.get("inputSchema") or {}
+        properties = schema.get("properties") or {}
+        
+        # 尝试不同的参数名
+        for field_name in ("keyword", "query", "foodName", "productName", "name"):
+            if field_name in properties:
+                arguments[field_name] = keyword
+                break
+        
+        result = self.call_tool("list-nutrition-foods", arguments)
+        return self._parse_nutrition_response(result)
+
+    def _parse_nutrition_response(self, result: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """
+        解析营养查询响应
+        
+        优先从 structuredContent.data 节点提取数据
+        
+        Args:
+            result: MCP 调用结果
+            
+        Returns:
+            营养数据字典列表
+        """
+        # 优先从 structuredContent.data 提取
+        toon_data = self._extract_structured_content_data(result)
+        
+        if not toon_data:
+            # 备用：从 text content 提取
+            toon_data = self.extract_text(result)
+        
+        if not toon_data or not toon_data.strip():
+            return None
+        
+        # 解析 TOON 格式
+        return self._parse_toon_format(toon_data)
+
+    def _extract_structured_content_data(self, result: dict[str, Any]) -> str | None:
+        """
+        从 MCP 结果中提取 structuredContent.data 节点
+        
+        Args:
+            result: MCP 调用结果
+            
+        Returns:
+            TOON 格式数据字符串
+        """
+        structured = result.get("result", {}).get("structuredContent", {})
+        data = structured.get("data")
+        
+        if isinstance(data, str) and data.strip():
+            return data
+        
+        return None
+
+    def _parse_toon_format(self, text: str) -> list[dict[str, Any]]:
+        """
+        解析 TOON 格式文本
+        
+        TOON 格式示例：
+        [160]{productName,nutritionDescription,energyKj,energyKcal,protein,fat,carbohydrate,sodium,calcium}:
+          猪柳麦满分,null,1288,308,16,16,24,781,213
+          板烧鸡腿堡,null,1638,391,23,17,35,1041,93
+          ...
+        
+        Args:
+            text: TOON 格式文本
+            
+        Returns:
+            解析后的字典列表
+        """
+        lines = text.strip().split('\n')
+        if not lines:
+            return []
+        
+        # 解析头部：提取字段名
+        header_line = lines[0].strip()
+        import re
+        header_match = re.search(r'\[(\d+)\]\{(.+?)\}', header_line)
+        if not header_match:
+            return []
+        
+        fields = [f.strip() for f in header_match.group(2).split(',')]
+        
+        # 解析数据行
+        records = []
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            
+            values = self._parse_toon_csv_line(line, len(fields))
+            if len(values) == len(fields):
+                record = dict(zip(fields, values))
+                records.append(record)
+        
+        return records
+
+    def _parse_toon_csv_line(self, line: str, expected_count: int) -> list[str | None]:
+        """
+        解析 TOON CSV 格式的行
+        
+        Args:
+            line: CSV 行
+            expected_count: 期望的字段数量
+            
+        Returns:
+            字段值列表
+        """
+        values = []
+        current = ""
+        in_quotes = False
+        
+        for char in line:
+            if char == '"':
+                in_quotes = not in_quotes
+            elif char == ',' and not in_quotes:
+                value = current.strip()
+                values.append(None if value.lower() == 'null' else value)
+                current = ""
+            else:
+                current += char
+        
+        # 添加最后一个字段
+        value = current.strip()
+        values.append(None if value.lower() == 'null' else value)
+        
+        return values
+
+    def _find_matching_nutrition(self, product_name: str, nutrition_records: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """
+        从营养记录列表中找到匹配的商品
+        
+        Args:
+            product_name: 要查找的商品名称
+            nutrition_records: 营养记录列表
+            
+        Returns:
+            匹配的营养数据，查找失败返回 None
+        """
+        if not nutrition_records:
+            return None
+        
+        normalized_query = self._normalize_nutrition_name(product_name)
+        
+        # 查找匹配
+        for record in nutrition_records:
+            product_name_field = record.get("productName", "")
+            if not product_name_field:
+                continue
+            
+            normalized_record_name = self._normalize_nutrition_name(product_name_field)
+            
+            # 匹配逻辑：完全匹配或包含关系
+            if (normalized_query == normalized_record_name or 
+                normalized_query in normalized_record_name or 
+                normalized_record_name in normalized_query):
+                return self._convert_toon_to_nutrition(record)
+        
+        return None
+
+    @staticmethod
+    def _normalize_nutrition_name(name: str) -> str:
+        """
+        标准化商品名称
+        
+        Args:
+            name: 商品名称
+            
+        Returns:
+            标准化后的名称
+        """
+        return "".join(name.lower().replace("（", "(").replace("）", ")").split())
+
+    def _convert_toon_to_nutrition(self, record: dict[str, Any]) -> dict[str, Any]:
+        """
+        将 TOON 格式的营养记录转换为标准格式
+        
+        TOON 字段 -> 标准字段：
+        - energyKcal -> calories
+        - protein -> protein_g
+        - fat -> fat_g
+        - carbohydrate -> carbs_g
+        - sodium -> sodium_mg
+        
+        Args:
+            record: TOON 格式记录
+            
+        Returns:
+            标准化的营养数据
+        """
+        nutrition = {}
+        
+        # 热量
+        energy_kcal = record.get('energyKcal')
+        if energy_kcal and energy_kcal != 'null':
+            try:
+                nutrition['calories'] = int(float(energy_kcal))
+            except (ValueError, TypeError):
+                pass
+        
+        # 蛋白质
+        protein = record.get('protein')
+        if protein and protein != 'null':
+            try:
+                nutrition['protein_g'] = float(protein)
+            except (ValueError, TypeError):
+                pass
+        
+        # 脂肪
+        fat = record.get('fat')
+        if fat and fat != 'null':
+            try:
+                nutrition['fat_g'] = float(fat)
+            except (ValueError, TypeError):
+                pass
+        
+        # 碳水化合物
+        carbs = record.get('carbohydrate')
+        if carbs and carbs != 'null':
+            try:
+                nutrition['carbs_g'] = float(carbs)
+            except (ValueError, TypeError):
+                pass
+        
+        # 钠
+        sodium = record.get('sodium')
+        if sodium and sodium != 'null':
+            try:
+                nutrition['sodium_mg'] = float(sodium)
+            except (ValueError, TypeError):
+                pass
+        
+        # 糖（TOON 格式中没有单独的糖字段）
+        # 钙
+        calcium = record.get('calcium')
+        if calcium and calcium != 'null':
+            try:
+                nutrition['calcium_mg'] = float(calcium)
+            except (ValueError, TypeError):
+                pass
+        
+        return nutrition
