@@ -18,20 +18,11 @@ class Settings(BaseSettings):
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL")
 
-    mcd_base_url: str = Field(default="https://api.open.mcd.cn", alias="MCD_BASE_URL")
-    mcd_app_id: str = Field(default="", alias="MCD_APP_ID")
-    mcd_merchant_id: str = Field(default="", alias="MCD_MERCHANT_ID")
-    mcd_sign_key: str = Field(default="", alias="MCD_SIGN_KEY")
-    mcd_version: str = Field(default="1.0", alias="MCD_VERSION")
     mcd_mcp_base_url: str = Field(default="https://mcp.mcd.cn", alias="MCD_MCP_BASE_URL")
     mcd_mcp_token: str = Field(default="", alias="MCD_MCP_TOKEN")
     mcd_mcp_protocol_version: str = Field(default="2025-06-18", alias="MCD_MCP_PROTOCOL_VERSION")
 
-    default_channel_code: str = Field(default="03", alias="DEFAULT_CHANNEL_CODE")
     default_order_type: int = Field(default=2, alias="DEFAULT_ORDER_TYPE")
-    default_be_code: str = Field(default="", alias="DEFAULT_BE_CODE")
-    default_daypart_code: str = Field(default="", alias="DEFAULT_DAYPART_CODE")
-    default_store_code: str = Field(default="", alias="DEFAULT_STORE_CODE")
 
     session_store_path: Path = Field(default=Path(".agent_state/sessions"), alias="SESSION_STORE_PATH")
     log_dir: Path = Field(default=Path("logs"), alias="LOG_DIR")

@@ -9,7 +9,7 @@ from langchain.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from .config import Settings
-from .mcd_mcp_client import McdApiError, McdMcpClient, McdToolError
+from .mcd_mcp_client import McdMcpClient, McdToolError
 from .models import (
     AgentSessionState,
     CartSnapshot,
@@ -178,6 +178,25 @@ def _extract_cart_payload(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cart_snapshot_from_payload(payload: dict[str, Any], *, store_code: str | None = None, be_code: str | None = None) -> CartSnapshot:
+    if "productList" in payload or "price" in payload:
+        return CartSnapshot(
+            store_code=store_code,
+            be_code=be_code,
+            order_type=payload.get("orderType"),
+            day_part_code=payload.get("dayPartCode"),
+            cart_type=1,
+            total_price=payload.get("originalPrice"),
+            product_total_price=payload.get("productPrice"),
+            discount_amount=payload.get("discount"),
+            delivery_price=payload.get("deliveryOriginalPrice"),
+            real_total_price=payload.get("price"),
+            real_delivery_price=payload.get("deliveryPrice"),
+            submit=None,
+            products=payload.get("productList") or [],
+            promotions=[],
+            tips={},
+            raw=payload,
+        )
     return CartSnapshot(
         store_code=payload.get("storeCode") or store_code,
         be_code=payload.get("beCode") or be_code,
@@ -465,15 +484,11 @@ def build_tools(
         if not chosen:
             return "没有找到指定门店，请先查看附近门店列表。"
 
-        if (not chosen.be_code or not chosen.dayparts) and chosen.code:
-            detail_result = client.get_store_detail(chosen.code)
-            chosen = _parse_store(detail_result.get("data") or chosen.raw)
-
         session_state.selected_store = chosen
         session_state.order_draft.store_code = chosen.code
         session_state.order_draft.be_code = chosen.be_code
         session_state.order_draft.order_type = session_state.preference.order_type or settings.default_order_type
-        session_state.order_draft.day_part_code = _default_daypart(chosen) or settings.default_daypart_code or None
+        session_state.order_draft.day_part_code = _default_daypart(chosen)
 
         response = {
             "message": "门店已选定，当前可以继续拉取菜单或同步购物车。",
@@ -496,8 +511,8 @@ def build_tools(
         be_code = be_code or selected_store.be_code
         order_type = order_type or session_state.order_draft.order_type or session_state.preference.order_type or settings.default_order_type
         day_part_code = day_part_code or session_state.order_draft.day_part_code or _default_daypart(selected_store)
-        if not all([store_code, be_code, day_part_code]):
-            return "门店上下文不完整，缺少 store_code / be_code / day_part_code。"
+        if not all([store_code, be_code]):
+            return "门店上下文不完整，缺少 store_code / be_code。"
 
         try:
             menu_response = client.get_menu(
@@ -506,7 +521,7 @@ def build_tools(
                 order_type=order_type,
                 day_part_code=day_part_code,
             )
-        except McdApiError as exc:
+        except McdToolError as exc:
             logger.warning("Falling back to local nutrition catalog for session=%s: %s", session_state.session_id, exc)
             flattened = [
                 {
@@ -586,57 +601,49 @@ def build_tools(
         return json.dumps(summary, ensure_ascii=False, indent=2)
 
     def sync_cart(items: list[CartItemInput], replace_cart: bool = True, data_source: int = 1) -> str:
+        del data_source
         draft = session_state.order_draft
-        if not draft.store_code or not draft.be_code or draft.order_type is None or not draft.day_part_code:
+        if not draft.store_code or not draft.be_code or draft.order_type is None:
             return "请先完成地址和门店选择，并拉取菜单后再同步购物车。"
 
-        if replace_cart:
-            client.clear_cart(
-                store_code=draft.store_code,
-                be_code=draft.be_code,
-                order_type=draft.order_type,
-                day_part_code=draft.day_part_code,
-            )
-
+        merged_items = list(session_state.order_draft.cart_items if not replace_cart else [])
+        merged_items.extend(
+            [
+                OrderItem(
+                    product_code=item.product_code,
+                    product_name=item.product_name,
+                    quantity=item.quantity,
+                    sequence=len(merged_items) + index + 1,
+                )
+                for index, item in enumerate(items)
+            ]
+        )
         products_payload = [
-            {
-                "code": item.product_code,
-                "name": item.product_name,
-                "quantity": item.quantity,
-            }
-            for item in items
+            {"productCode": item.product_code, "productName": item.product_name, "quantity": item.quantity}
+            for item in merged_items
         ]
-        client.update_cart(
+        price_result = client.calculate_price(
             store_code=draft.store_code,
             be_code=draft.be_code,
             order_type=draft.order_type,
-            day_part_code=draft.day_part_code,
-            data_source=data_source,
-            products=products_payload,
+            items=products_payload,
         )
-
-        cart_result = client.get_cart(
-            store_code=draft.store_code,
-            be_code=draft.be_code,
-            order_type=draft.order_type,
-            day_part_code=draft.day_part_code,
-        )
-        cart_payload = _extract_cart_payload(cart_result)
+        cart_payload = price_result.get("data") or {}
         session_state.cart_snapshot = _cart_snapshot_from_payload(cart_payload, store_code=draft.store_code, be_code=draft.be_code)
-        order_items = [
+        session_state.order_draft.cart_items = [
             OrderItem(
-                product_code=item.product_code,
-                product_name=item.product_name,
-                quantity=item.quantity,
+                product_code=item.get("productCode") or "",
+                product_name=item.get("productName") or "",
+                quantity=int(item.get("quantity") or 1),
+                real_subtotal=item.get("subtotal"),
                 sequence=index + 1,
             )
-            for index, item in enumerate(items)
+            for index, item in enumerate(cart_payload.get("productList") or products_payload)
         ]
-        session_state.order_draft.cart_items = order_items
         session_state.nutrition_report = None
         return json.dumps(
             {
-                "message": "购物车已同步。",
+                "message": "商品价格已通过 MCP 计算并同步到当前订单草稿。",
                 "cart_summary": {
                     "store_code": session_state.cart_snapshot.store_code,
                     "real_total_price": session_state.cart_snapshot.real_total_price,
@@ -651,18 +658,23 @@ def build_tools(
 
     def get_cart_detail() -> str:
         draft = session_state.order_draft
-        if not draft.store_code or not draft.order_type or not draft.day_part_code:
+        if not draft.store_code or not draft.be_code or draft.order_type is None:
             return "请先完成门店选择后再查询购物车明细。"
-        cart_result = client.get_cart(
+        if not draft.cart_items:
+            return "购物车为空，无法查询价格明细。"
+        cart_result = client.calculate_price(
             store_code=draft.store_code,
             be_code=draft.be_code,
             order_type=draft.order_type,
-            day_part_code=draft.day_part_code,
+            items=[
+                {"productCode": item.product_code, "productName": item.product_name, "quantity": item.quantity}
+                for item in draft.cart_items
+            ],
         )
-        cart_payload = _extract_cart_payload(cart_result)
+        cart_payload = cart_result.get("data") or {}
         session_state.cart_snapshot = _cart_snapshot_from_payload(cart_payload, store_code=draft.store_code, be_code=draft.be_code)
-        if cart_payload.get("products"):
-            session_state.order_draft.cart_items = _products_to_order_items(cart_payload["products"])
+        if cart_payload.get("productList"):
+            session_state.order_draft.cart_items = _products_to_order_items(cart_payload["productList"])
 
         summary = {
             "store_code": session_state.cart_snapshot.store_code,
@@ -750,35 +762,20 @@ def build_tools(
         real_delivery_price = draft.real_delivery_price or _cents_to_yuan(session_state.cart_snapshot.real_delivery_price)
 
         payload = {
-            "orderType": str(draft.order_type),
+            "orderType": draft.order_type,
             "storeCode": draft.store_code,
             "beCode": draft.be_code,
-            "dayPartCode": draft.day_part_code,
-            "eatTypeCode": draft.eat_type_code,
-            "pickupTimeCode": draft.pickup_time_code,
-            "expectDeliveryTimeCode": draft.expect_delivery_time_code,
-            "expectDeliveryDateCode": draft.expect_delivery_date_code,
             "addressId": draft.address_id,
-            "tablewareCode": draft.tableware_code,
-            "remark": draft.remark,
-            "realTotalAmount": real_total_amount,
-            "realDeliveryPrice": real_delivery_price,
-            "cardId": draft.card_id,
-            "cartItems": [
+            "items": [
                 {
-                    "sequence": item.sequence,
                     "productCode": item.product_code,
                     "quantity": item.quantity,
-                    "realSubtotal": _cents_to_yuan(item.real_subtotal) if item.real_subtotal is not None else None,
-                    "productName": item.product_name,
-                    "productType": item.product_type,
-                    "uniqueKey": item.unique_key,
                 }
                 for item in draft.cart_items
             ],
         }
         payload = {k: v for k, v in payload.items() if v is not None}
-        payload["cartItems"] = [{k: v for k, v in item.items() if v is not None} for item in payload["cartItems"]]
+        payload["items"] = [{k: v for k, v in item.items() if v is not None} for item in payload["items"]]
 
         if settings.dry_run_orders:
             session_state.confirmed = True
@@ -786,6 +783,10 @@ def build_tools(
                 {
                     "message": "当前处于 DRY_RUN_ORDERS=true 模式，已完成模拟下单。",
                     "payload_preview": payload,
+                    "price_summary": {
+                        "real_total_amount": real_total_amount,
+                        "real_delivery_price": real_delivery_price,
+                    },
                     "nutrition": _nutrition_report_to_dict(session_state.nutrition_report) if session_state.nutrition_report else None,
                 },
                 ensure_ascii=False,
@@ -793,8 +794,8 @@ def build_tools(
             )
 
         try:
-            result = client.submit_order(payload)
-        except McdApiError as exc:
+            result = client.create_order(payload)
+        except McdToolError as exc:
             return f"下单失败: {exc}"
         session_state.confirmed = True
         return json.dumps(result, ensure_ascii=False, indent=2)
