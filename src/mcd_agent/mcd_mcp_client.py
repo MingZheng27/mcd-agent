@@ -239,6 +239,7 @@ class McdMcpClient:
                 [
                     str(tool.get("name") or ""),
                     str(tool.get("description") or ""),
+                    # call list/tools get all available tools and store input and output schema restriction
                     json.dumps(tool.get("inputSchema") or {}, ensure_ascii=False, sort_keys=True),
                 ]
             ).lower()

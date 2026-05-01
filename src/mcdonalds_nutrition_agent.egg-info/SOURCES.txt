@@ -18,3 +18,4 @@ src/mcdonalds_nutrition_agent.egg-info/dependency_links.txt
 src/mcdonalds_nutrition_agent.egg-info/entry_points.txt
 src/mcdonalds_nutrition_agent.egg-info/requires.txt
 src/mcdonalds_nutrition_agent.egg-info/top_level.txt
+tests/test_toon_parsing.py
